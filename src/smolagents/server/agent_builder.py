@@ -65,8 +65,8 @@ BASE_PYTHON_TOOLS = {
 
 
 class InputTool(Tool):
-    name = "user_input"
-    description = "Ask the user for information for using tools.\nExample:\n```py\nprint(user_input('question for user'))\n```\n"
+    name = "input"
+    description = "To resolve parameters for using tools, ask user for information."
     inputs = {"question": {"type": "string", "description": "question for user"}}
     output_type = "string"
 
@@ -85,7 +85,7 @@ class Component(Display):
     def display(self,expr):
         res = "There has a result which stored in memory."
         if hasattr(expr,'id'):
-            res = f"The `{expr.id}` results stored in memory which can be f-string."
+            res = f"The `{expr.id}` is successfully stored in memory which can be f-string."
         return res
 
 
@@ -187,7 +187,11 @@ class MCPTool(Tool):
         self.headers = {
             'X-API-KEY': self.api_key
         }
-    
+        self.proxies = {
+            'http': '',
+            'https': '',
+        }
+
     def validate_arguments(self):
         pass
 
@@ -196,7 +200,7 @@ class MCPTool(Tool):
         headers.update(self.headers)
         response = requests.post(self.url,
             json={"name":name},
-            headers=headers,cookies={})
+            headers=headers,cookies={},proxies= self.proxies)
     
         if response.status_code != 200:
             raise ValueError(f"Failed to fetch tools: HTTP {response.status_code}")
@@ -261,7 +265,7 @@ class MCPTool(Tool):
             "name": name,
             "toolName": tool_name,
             "data": kwargs
-        },headers=headers,cookies={})
+        },headers=headers,cookies={},proxies=self.proxies)
         
         if response.status_code != 200:
             raise ValueError(f"Failed to execute tool: HTTP {response.status_code}")
@@ -409,7 +413,7 @@ def parse_agent(config: Dict[str, Any], builder: AgentBuilder) -> Dict[str, Any]
                 agent_data['prompt_templates'][key] = value
 
     # 处理其它属性
-    agent_data['grammar'] = config['spec'].get('grammar', {})
+    agent_data['grammar'] = config['spec'].get('grammar')
     agent_data['planning_interval'] = config['spec'].get('planning_interval')
     agent_data['max_steps'] = config['spec'].get('max_steps', None)
     agent_data['add_base_tools'] = config['spec'].get('add_base_tools', False)

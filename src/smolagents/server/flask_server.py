@@ -171,7 +171,7 @@ class ModelList:
         if type == 'OpenAI':
             self.model_dir[name] = OpenAIServerModel(http_client=http_client, **kwargs)
         else:
-            self.model_dir[name] = LiteLLMModel(custom_role_conversions = {},proxy=proxy,**kwargs)
+            self.model_dir[name] = LiteLLMModel(custom_role_conversions = custom_role_conversions,client=http_client,**kwargs)
 
     def get_model(self, name: str) -> Model:
         if name in self.model_dir:

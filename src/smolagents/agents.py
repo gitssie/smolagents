@@ -1298,7 +1298,7 @@ class CodeAgent(MultiStepAgent):
             raise AgentExecutionError(error_msg, self.logger)
         except UserInputError as e:
             output = AgentInput(e.value,self)
-            #memory_step.model_output = remove_code_from_model_output(model_output)
+            memory_step.model_output = f"{remove_code_from_model_output(model_output)}\n```py:resolved\n raise input('{e.value}')\n```"
             memory_step.action_output = output
             memory_step.tool_calls = None
             memory_step.observations = "Execution logs:\nNone"

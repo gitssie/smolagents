@@ -21,20 +21,19 @@ import inspect
 import logging
 import math
 import re
+import cachetools
 from collections.abc import Mapping
 from functools import wraps
 from importlib import import_module
 from importlib.util import find_spec
 from types import BuiltinFunctionType, FunctionType, ModuleType
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-import cachetools
 import numpy as np
 import pandas as pd
 
-from .utils import BASE_BUILTIN_MODULES, truncate_content, StringBuffer, Display
+from .utils import BASE_BUILTIN_MODULES, truncate_content, StringBuffer, Display, UserInputError
 
 from .tools import Tool
-from .utils import BASE_BUILTIN_MODULES, truncate_content
 
 
 logger = logging.getLogger(__name__)
@@ -195,6 +194,33 @@ class ReturnException(Exception):
     def __init__(self, value):
         self.value = value
 
+
+def custom_input(*args,**kwargs):
+    if len(args) >0:
+        return args[0]
+    elif len(kwargs) >0:
+        return next(iter(kwargs.values()))
+    else:
+        raise InterpreterError("input argument is required")
+
+def validate_ast(expression):
+    state = {}
+    custom_tools = {}
+    static_tools = {'input': custom_input}
+    authorized_imports = []
+    res = []
+    try:
+        for node in expression.body:
+            if isinstance(node,ast.Assign):
+                node = node.value
+            if isinstance(node, ast.Call):
+                if node.func.id == "input":
+                    res.append(evaluate_call(node,state,static_tools,custom_tools,authorized_imports))
+    except BaseException:
+        pass
+    
+    if len(res) > 0:
+        raise UserInputError('\n'.join(res))
 
 def get_iterable(obj):
     if isinstance(obj, list):
@@ -1407,6 +1433,7 @@ def evaluate_python_code(
     """
     try:
         expression = ast.parse(code)
+        validate_ast(expression)
     except SyntaxError as e:
         raise InterpreterError(
             f"Code parsing failed on line {e.lineno} due to: {type(e).__name__}\n"

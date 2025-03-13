@@ -50,6 +50,9 @@ system_prompt: |-
   final_answer(result)
   ```<end_code>
 
+  ---
+  Task: "What is the current age of the pope, raised to the power 0.36?"
+  
   ```thought
   I will use the tool `wiki` to get the age of the pope, and confirm that with a web search.
   ```
