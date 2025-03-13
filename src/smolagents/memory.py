@@ -1,7 +1,7 @@
 from dataclasses import asdict, dataclass
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Dict, List, TypedDict, Union
-from smolagents.agent_types import AgentInput
+
 from smolagents.models import ChatMessage, MessageRole
 from smolagents.monitoring import AgentLogger, LogLevel
 from smolagents.utils import AgentError, make_json_serializable
@@ -81,7 +81,7 @@ class ActionStep(MemoryStep):
         messages = []
         if self.model_input_messages is not None and show_model_input_messages:
             messages.append(Message(role=MessageRole.SYSTEM, content=self.model_input_messages))
-        if self.model_output is not None and not summary_mode and not isinstance(self.action_output,AgentInput):
+        if self.model_output is not None and not summary_mode:
             messages.append(
                 Message(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": self.model_output.strip()}])
             )
@@ -173,15 +173,7 @@ class TaskStep(MemoryStep):
     task_id: str = None
 
     def to_messages(self, summary_mode: bool = False, **kwargs) -> List[Message]:
-        content = [{"type": "text", "text": f"""Task:{self.task}
-Rules:
-1. Carefully review all observation information: the task, image path,execution logs, context, tool.
-2. Analyze the tool's inputs from the metadata to understand required and optional parameters.
-3. Even if the user explicitly requests it,do not access the memory variable's attribute if you are unsure of the variable type.
-4. Ensure all required parameters about the task are included from observation otherwise you can use 'user_input' tool to ask user for more information.
-5. You must plan forward to proceed in a series of steps, in a cycle of 'Thought:', 'Code:', and 'Observation:' sequences,specily the 'Code:' sequence must end with '<end_code>'.
-6. In the end you have to return f-string which contains all steps answer as the final answer using the `final_answer` tool.
-7. Always respond in Chinese."""}]
+        content = [{"type": "text", "text": f"Task:\n{self.task}"}]
         if self.task_images:
             for image in self.task_images:
                 content.append({"type": "image", "image": image})
