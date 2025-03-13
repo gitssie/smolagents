@@ -392,35 +392,26 @@ def parse_json_blob(json_blob: str) -> Dict[str, str]:
         raise ValueError(f"Error in parsing the JSON blob: {e}")
 
 
-def parse_code_blobs(text: str) -> str:
-    """Extract code blocs from the LLM's output.
+def parse_code_blobs(code_blob: str) -> Tuple[str, bool]:
+    """Parses the LLM's output to get any code blob inside. Will return the code directly if it's code."""
+    pattern = r"```(?:py|python)(?::[^\n]*)?\n(.*?)\n```"
+    matches = re.findall(pattern, code_blob, re.DOTALL)
+    if len(matches) == 0:
+        try:  # Maybe the LLM outputted a code blob directly
+            return code_blob,False
+        except SyntaxError:
+            pass
 
-    If a valid code block is passed, it returns it directly.
-
-    Args:
-        text (`str`): LLM's output text to parse.
-
-    Returns:
-        `str`: Extracted code block.
-
-    Raises:
-        ValueError: If no valid code block is found in the text.
-    """
-    pattern = r"```(?:py|python)?\n(.*?)\n```"
-    matches = re.findall(pattern, text, re.DOTALL)
-    if matches:
-        return "\n\n".join(match.strip() for match in matches)
-    # Maybe the LLM outputted a code blob directly
-    try:
-        ast.parse(text)
-        return text
-    except SyntaxError:
-        pass
-
-    if "final" in text and "answer" in text:
-        raise ValueError(
-            dedent(
+        if "final" in code_blob and "answer" in code_blob:
+            raise ValueError(
                 f"""
+Your code snippet is invalid, because the regex pattern {pattern} was not found in it.
+It seems like you're trying to return the final answer, you can do it as follows:
+```py
+final_answer("YOUR FINAL ANSWER HERE")
+```<end_code>""".strip()
+            )
+        raise ValueError("""
                 Your code snippet is invalid, because the regex pattern {pattern} was not found in it.
                 Here is your code snippet:
                 {text}
@@ -431,22 +422,8 @@ def parse_code_blobs(text: str) -> str:
                 ```<end_code>
                 """
             ).strip()
-        )
-    raise ValueError(
-        dedent(
-            f"""
-            Your code snippet is invalid, because the regex pattern {pattern} was not found in it.
-            Here is your code snippet:
-            {text}
-            Make sure to include code with the correct pattern, for instance:
-            Thoughts: Your thoughts
-            Code:
-            ```py
-            # Your python code here
-            ```<end_code>
-            """
-        ).strip()
-    )
+
+    return "\n\n".join(match.strip() for match in matches),True
 
 
 def parse_json_tool_call(json_blob: str) -> Tuple[str, Union[str, None]]:
@@ -686,3 +663,17 @@ def make_init_file(folder: str):
     # Create __init__
     with open(os.path.join(folder, "__init__.py"), "w"):
         pass
+
+def extract_thought_from_model_output(model_output: str) -> str:
+    thought_pattern = r"```thought(.*?)```\n"
+    match = re.search(thought_pattern, model_output, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return remove_code_from_model_output(model_output)
+
+def remove_code_from_model_output(model_output: str) -> str:
+    pre_code_pattern = r"^(.*?)```(?:py|python)"
+    match = re.search(pre_code_pattern, model_output, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return model_output

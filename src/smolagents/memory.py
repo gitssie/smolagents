@@ -100,17 +100,7 @@ class ActionStep(MemoryStep):
             #     )
             # )
 
-        messages.append(
-            Message(
-                role=MessageRole.TOOL_RESPONSE,
-                content=[
-                    {
-                        "type": "text",
-                        "text": f"Observation:\n{self.observations}",
-                    }
-                ],
-            )
-        )
+        logs = [str(self.observations)]
         if self.error is not None:
             error_message = (
                 "Error:\n"
@@ -119,9 +109,19 @@ class ActionStep(MemoryStep):
             )
             message_content = f"Call id: {self.tool_calls[0].id}\n" if self.tool_calls else ""
             message_content += error_message
-            messages.append(
-                Message(role=MessageRole.TOOL_RESPONSE, content=[{"type": "text", "text": message_content}])
+            logs.append(message_content)
+
+        messages.append(
+            Message(
+                role=MessageRole.TOOL_RESPONSE,
+                content=[
+                    {
+                        "type": "text",
+                        "text": f"```observation\n{'\n'.join(logs)}```\n",
+                    }
+                ],
             )
+        )
 
         if self.observations_images:
             messages.append(
@@ -173,7 +173,7 @@ class TaskStep(MemoryStep):
     task_id: str = None
 
     def to_messages(self, summary_mode: bool = False, **kwargs) -> List[Message]:
-        content = [{"type": "text", "text": f"Task:\n{self.task}"}]
+        content = [{"type": "text", "text": f"Task: {self.task}"}]
         if self.task_images:
             for image in self.task_images:
                 content.append({"type": "image", "image": image})

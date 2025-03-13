@@ -2,7 +2,7 @@ import ast
 import importlib
 import math
 from typing import Any, List, Dict, Callable
-
+import requests
 import yaml
 from smolagents import CodeAgent, Tool, LogLevel, evaluate_ast, AUTHORIZED_TYPES
 from smolagents.agents import MultiStepAgent
@@ -66,7 +66,7 @@ BASE_PYTHON_TOOLS = {
 
 class InputTool(Tool):
     name = "user_input"
-    description = "requests user input for specific questions, but stops subsequent code execution.."
+    description = "Ask the user for information for using tools.\nExample:\n```py\nprint(user_input('question for user'))\n```\n"
     inputs = {"question": {"type": "string", "description": "question for user"}}
     output_type = "string"
 
@@ -83,9 +83,9 @@ class Component(Display):
         #return "The print() has returned a result stored in memory."
 
     def display(self,expr):
-        res = "There has a result stored in memory"
+        res = "There has a result which stored in memory."
         if hasattr(expr,'id'):
-            res += f" that we can use '{expr.id}' variable whose type is object in next code snippet to complete the task."
+            res = f"The `{expr.id}` results stored in memory which can be f-string."
         return res
 
 
@@ -176,17 +176,140 @@ class APITool(Tool):
 
         assert getattr(self, "output_type", None) in AUTHORIZED_TYPES
 
+class MCPTool(Tool):
+    def __init__(self,name:str, url: str,api_key:str, mcp_tools:List[str]):
+        self.name = name
+        self.url = url
+        self.api_key = api_key
+        self.mcp_tools = mcp_tools
+        self.forward = None
+        self.is_initialized = True
+        self.headers = {
+            'X-API-KEY': self.api_key
+        }
+    
+    def validate_arguments(self):
+        pass
 
+    def fetch_tools(self,headers:dict):
+        name = [self.name] if self.mcp_tools is None or len(self.mcp_tools) == 0 else self.mcp_tools
+        headers.update(self.headers)
+        response = requests.post(self.url,
+            json={"name":name},
+            headers=headers,cookies={})
+    
+        if response.status_code != 200:
+            raise ValueError(f"Failed to fetch tools: HTTP {response.status_code}")
+            
+        data = response.json()
+        
+        # Check if the API returned a success code
+        if data.get("code") != 0:
+            error_msg = data.get('message', 'Unknown error')
+            raise ValueError(f"API error: {error_msg}")
+        
+        tools = []
+        if "data" not in data:
+            return tools
+        data = data["data"]
+        if isinstance(data, list):
+            tools.extend(self.parse_tools(name[0],data))
+        elif isinstance(data, dict):
+            for mcp_name,tool_list in data.items():
+                tools.extend(self.parse_tools(mcp_name,tool_list,headers))
+        return tools
+    
+    def parse_tools(self,mcp_name:str,tool_list:List[dict],headers:dict):
+        tools = []
+        for tool_data in tool_list:
+            if not tool_data.get("enabled", True):
+                continue
+                
+            # Convert input format to match APITool requirements
+            inputs = {}
+            for input_item in tool_data.get("input", []):
+                name = input_item.get("name")
+                if name:
+                    inputs[name] = {
+                        "type": input_item.get("type", "string"),
+                        "description": input_item.get("description", ""),
+                        "required": input_item.get("required", False)
+                    }
+            
+            tool_name = tool_data.get("name")
+            # Create a function that will call the API endpoint with proper closure
+            def create_forward_function(tool_name):
+                def forward(**kwargs):
+                    return self.execute(name=mcp_name, tool_name=tool_name,headers=headers, **kwargs)
+                return forward
+            
+            # Create the APITool
+            tool = APITool(
+                name=f"{mcp_name}_{tool_name}",
+                description=tool_data.get("description", ""),
+                inputs=inputs,
+                output_type=tool_data.get("output_type", "object"),
+                function=create_forward_function(tool_name)  # Call the factory function to get a properly bound forward function
+            )
+            tools.append(tool)
+        
+        return tools
+
+
+    def execute(self,name:str,tool_name:str,headers:dict, **kwargs):
+        response = requests.post(f"{self.url}/execute", json={
+            "name": name,
+            "toolName": tool_name,
+            "data": kwargs
+        },headers=headers,cookies={})
+        
+        if response.status_code != 200:
+            raise ValueError(f"Failed to execute tool: HTTP {response.status_code}")
+            
+        data = response.json()
+        
+        # Check if the API returned a success code
+        if data.get("code") != 0:
+            error_msg = data.get('message', 'Unknown error')
+            # Add errors details if available
+            if 'errors' in data and isinstance(data['errors'], dict):
+                error_details = '; '.join([f"{k}: {v}" for k, v in data['errors'].items()])
+                error_msg = f"{error_msg} - Details: {error_details}"
+            return f"Error: {error_msg}"
+        
+        # Extract the actual content from the nested data structure
+        result_data = data.get("data", {})
+        return self.handle_result(result_data)
+
+    def handle_result(self,result):
+        if isinstance(result, dict):
+            if 'type' in result:
+                return self.hanle_content(result['type'], result['content'])
+            elif 'content' in result:   
+                return str(result['content'])
+        return str(result)
+
+    def hanle_content(self,type,content):
+        if type == 'text':
+            if isinstance(content, dict):
+                return content.get('content') or content.get('text')
+            elif isinstance(content,list):
+                return str(content)
+            return content
+        else:
+            return Component(content)
+
+        
 class AgentBuilder:
     def __init__(self, model_list=None):
         self.agents = {}
         self.tools = {}
         self.model_list = model_list
 
-    def build(self):
+    def build(self,headers:dict):
         agents = {}
         for _ in range(len(self.agents)):
-            parse_deps(agents, self)
+            parse_deps(agents, self,headers)
 
         for _, agent_data in agents.items():
             if isinstance(agent_data, dict):
@@ -200,8 +323,12 @@ def parse_tool(tool_config: Dict[str, Any]) -> Tool:
     tool_data = {'name': tool_config['metadata'].get('name', 'default_tool'),
                  'description': tool_config['metadata'].get('description', ''),
                  'input': {}}
-
-    if 'spec' in tool_config and 'input' in tool_config['spec']:
+    
+    if 'mcp_tools' in tool_config['spec']:
+        mcp_tools = tool_config['spec']['mcp_tools']
+        return MCPTool(tool_data['name'],mcp_tools['url'],mcp_tools['api_key'],mcp_tools['tools'])
+    
+    if 'input' in tool_config['spec']:
         for input_item in tool_config['spec']['input']:
             tool_data['input'].update(input_item)
 
@@ -305,7 +432,7 @@ def parse_code_agent(config: Dict[str, Any], builder: AgentBuilder) -> Dict[str,
     return agent_data
 
 
-def parse_deps(agents: Dict[str, Any], builder: AgentBuilder):
+def parse_deps(agents: Dict[str, Any], builder: AgentBuilder,headers:dict):
     for key, agent_data in builder.agents.items():
         agent = agents.get(key)
         if agent is None:
@@ -323,10 +450,21 @@ def parse_deps(agents: Dict[str, Any], builder: AgentBuilder):
                     else:
                         managed_agents[i] = managed_agent
             if lazy_count == 0:
+                agent['tools'] = parse_deps_tools(agent['tools'],builder,headers)
                 kind = agent['kind']
                 del agent['kind']
                 agents[key] = kind(**agent)
 
+def parse_deps_tools(tools:List,builder: AgentBuilder,headers:dict) -> List[Tool]:
+    arr = []
+    for tool in tools:
+        if isinstance(tool, str):
+            arr.append(builder.tools[tool])
+        elif isinstance(tool, MCPTool):
+            arr.extend(tool.fetch_tools(headers))
+        else:
+            arr.append(tool)
+    return arr
 
 def parse_yaml(config_list: List[Dict[str, Any]], model_list) -> AgentBuilder:
     builder = AgentBuilder(model_list)
@@ -348,20 +486,19 @@ def parse_yaml(config_list: List[Dict[str, Any]], model_list) -> AgentBuilder:
             if isinstance(tools[i], str):
                 tool = builder.tools.get(tools[i])
                 if tool is None:
-                    raise ValueError(f"You specify a tool that named {tool} is not find or cycle dependency.")
+                    raise ValueError(f"You specify a tool that named {tools[i]} is not find or cycle dependency.")
                 else:
                     tools[i] = tool
-
     return builder
 
 
-def agent_builder(chat_id: str, agent_id: str, model_list) -> MultiStepAgent:
+def agent_builder(chat_id: str, agent_id: str, model_list,headers:dict) -> MultiStepAgent:
     # 根据agent_id找到对于的YAML配置,解析YAML为dataclass，并根据dataclass生成Agent
     config = yaml.safe_load_all(
         importlib.resources.files("smolagents.server").joinpath(f"{agent_id}.yaml").read_text(encoding='utf-8')
     )
     builder = parse_yaml(config, model_list)
-    agents = builder.build()
+    agents = builder.build(headers=headers)
     for _, agent in agents.items():
         return agent
     return None

@@ -65,6 +65,7 @@ from .utils import (
     parse_code_blobs,
     parse_json_tool_call,
     truncate_content,
+    remove_code_from_model_output
 )
 
 
@@ -292,6 +293,15 @@ class MultiStepAgent:
         agent.run("What is the result of 2 power 3.7384?")
         ```
         """
+        if len(self.memory.steps) > 0 and isinstance(self.memory.steps[-1], ActionStep):
+            step = self.memory.steps[-1]
+            output = step.action_output
+            if isinstance(output,AgentInput):
+                agent = output.agent
+                step.action_output = None
+                if agent != self:
+                    return agent.run(task, stream=stream, reset=reset, images=images, additional_args=additional_args)
+
         max_steps = max_steps or self.max_steps
         self.task = task
         self.task_id = str(uuid.uuid4())
@@ -1224,7 +1234,7 @@ class CodeAgent(MultiStepAgent):
             additional_args = {"grammar": self.grammar} if self.grammar is not None else {}
             chat_message: ChatMessage = self.model(
                 self.input_messages,
-                stop_sequences=["<end_code>", "Observation:"],
+                stop_sequences=["<end_code>", "```observation"],
                 **additional_args,
             )
             memory_step.model_output_message = chat_message
@@ -1241,11 +1251,14 @@ class CodeAgent(MultiStepAgent):
 
         # Parse
         try:
-            code_action = fix_final_answer_code(parse_code_blobs(model_output))
+            code_action,is_code = parse_code_blobs(model_output)
         except Exception as e:
             error_msg = f"Error in code parsing:\n{e}\nMake sure to provide correct code blobs."
             raise AgentParsingError(error_msg, self.logger)
 
+        if not is_code:
+            return model_output
+        
         memory_step.tool_calls = [
             ToolCall(
                 name="python_interpreter",
@@ -1285,16 +1298,22 @@ class CodeAgent(MultiStepAgent):
             raise AgentExecutionError(error_msg, self.logger)
         except UserInputError as e:
             output = AgentInput(e.value,self)
+            #memory_step.model_output = remove_code_from_model_output(model_output)
             memory_step.action_output = output
             memory_step.tool_calls = None
-            memory_step.observations = ""
+            memory_step.observations = "Execution logs:\nNone"
             return output
 
         truncated_output = truncate_content(str(output))
         if is_final_answer:
-            observation += "You have provided the final answer, so the task is complete." #"Last output from code snippet:\n" + truncated_output
+            if output is None:
+                observation = "Last output from code snippet:\n" + truncated_output
+            else:
+                observation += "You have provided the final answer, so the task is complete." 
+            
         memory_step.observations = observation
-
+        memory_step.action_output = output
+        
         execution_outputs_console += [
             Text(
                 f"{('Out - Final answer' if is_final_answer else 'Out')}: {truncated_output}",
@@ -1302,5 +1321,5 @@ class CodeAgent(MultiStepAgent):
             ),
         ]
         self.logger.log(Group(*execution_outputs_console), level=LogLevel.INFO)
-        memory_step.action_output = output
+       
         return output if is_final_answer else None

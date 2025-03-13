@@ -19,7 +19,7 @@ from smolagents import Model, OpenAIServerModel, LiteLLMModel, MessageRole, Stri
 from smolagents.agent_types import AgentAudio, AgentImage, AgentText, AgentRaw, handle_agent_output_types
 from smolagents.agents import ActionStep, MultiStepAgent, ChatMessage
 from smolagents.memory import MemoryStep
-
+from smolagents.utils import extract_thought_from_model_output
 
 def chat_message_to_json(chat_message):
     """将 gr.ChatMessage 对象转换为 JSON 字符串。"""
@@ -48,12 +48,8 @@ def pull_messages_from_step(step_log: MemoryStep):
         # First yield the thought/reasoning from the LLM
         if hasattr(step_log, "model_output") and step_log.model_output is not None:
             # Clean up the LLM output
-            model_output = step_log.model_output.strip()
-            pattern = r"Thought:(.*?)\nCode:(\n)?"
-            match = re.search(pattern, model_output, re.DOTALL)
-            if match:
-                model_output = match.group(1).strip()  # 返回捕获组的内容并去除首尾空格
-            yield {"role": "assistant", "type": "thinking", "content": model_output}
+            thought = extract_thought_from_model_output(step_log.model_output)
+            yield {"role": "assistant", "type": "thinking", "content": thought}
 
             # Nesting any errors under the tool call
             if hasattr(step_log, "error") and step_log.error is not None:
@@ -171,14 +167,11 @@ class ModelList:
                   **kwargs):
         if http_client is None and proxy is not None:
             http_client = httpx.Client(proxy=proxy, timeout=60)
-        custom_role_conversions = {
-            MessageRole.TOOL_CALL: MessageRole.ASSISTANT,
-            MessageRole.TOOL_RESPONSE: MessageRole.ASSISTANT,
-        }
+        custom_role_conversions = {}
         if type == 'OpenAI':
-            self.model_dir[name] = OpenAIServerModel(custom_role_conversions={}, http_client=http_client, **kwargs)
+            self.model_dir[name] = OpenAIServerModel(http_client=http_client, **kwargs)
         else:
-            self.model_dir[name] = LiteLLMModel(custom_role_conversions={}, client=http_client, **kwargs)
+            self.model_dir[name] = LiteLLMModel(custom_role_conversions = {},proxy=proxy,**kwargs)
 
     def get_model(self, name: str) -> Model:
         if name in self.model_dir:
@@ -205,7 +198,7 @@ class AgentCoordinator:
         self.agent_locks = {}
         self.locks_lock = Lock()
 
-    def getAgent(self, chat_id: str, agent_id: str) -> Tuple[MultiStepAgent, Lock]:
+    def getAgent(self, chat_id: str, agent_id: str,headers:dict) -> Tuple[MultiStepAgent, Lock]:
         with self.locks_lock:
             # Get or create a lock for this chat_id
             if chat_id not in self.agent_locks:
@@ -215,7 +208,7 @@ class AgentCoordinator:
             # Get or create the agent
             agent = self.cache.get(chat_id)
             if agent is None:
-                agent = self.agent_builder(chat_id, agent_id, self.model_list)
+                agent = self.agent_builder(chat_id, agent_id, self.model_list,headers)
                 self.cache[chat_id] = agent
             
             return agent, chat_lock
@@ -394,6 +387,13 @@ class FlaskServer:
             if not is_valid:
                 return jsonify({"error": error_message}), 400
 
+            # Get authorization and cookie headers
+            headers = {}
+            if 'Authorization' in request.headers:
+                headers['Authorization'] = request.headers['Authorization']
+            if 'Cookie' in request.headers:
+                headers['Cookie'] = request.headers['Cookie']
+
             chat_id = data["chat_id"]
             agent_id = data["agent_id"]
             messages = data["messages"]
@@ -401,7 +401,7 @@ class FlaskServer:
             
             lock = None
             try:
-                agent, lock = self.coordinator.getAgent(chat_id, agent_id)
+                agent, lock = self.coordinator.getAgent(chat_id, agent_id,headers=headers)
                 
                 # Check if the lock is already acquired
                 if not lock.acquire(blocking=False):
@@ -438,6 +438,8 @@ class FlaskServer:
                 if lock and lock.locked():
                     lock.release()
                 self.execution_manager.end_task(chat_id, is_success=False)
+                if self.app.debug:
+                    raise e
                 return jsonify({"error": str(e)}), 500
 
         @app.route('/system/status', methods=['GET'])
@@ -450,6 +452,8 @@ class FlaskServer:
                 }
                 return jsonify(status)
             except Exception as e:
+                if self.app.debug:
+                    raise e
                 return jsonify({"error": f"Error getting system status: {str(e)}"}), 500
 
         self.app.register_blueprint(app, url_prefix='/app')
