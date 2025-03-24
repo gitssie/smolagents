@@ -45,7 +45,7 @@ from ._function_type_hints_utils import (
 )
 from .agent_types import handle_agent_input_types, handle_agent_output_types
 from .tool_validation import MethodChecker, validate_tool_attributes
-from .utils import BASE_BUILTIN_MODULES, _is_package_available, _is_pillow_available, get_source, instance_to_source
+from .utils import BASE_BUILTIN_MODULES, _is_package_available, get_source, instance_to_source
 
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class Tool:
         ):
             signature = inspect.signature(self.forward)
 
-            if not set(signature.parameters.keys()) == set(self.inputs.keys()):
+            if not set(key for key in signature.parameters.keys() if key != "self") == set(self.inputs.keys()):
                 raise Exception(
                     f"In tool '{self.name}', 'forward' method should take 'self' as its first argument, then its next arguments should match the keys of tool attribute 'inputs'."
                 )
@@ -264,7 +264,7 @@ class Tool:
 
         return {"name": self.name, "code": tool_code, "requirements": requirements}
 
-    def save(self, output_dir: str, tool_file_name: str = "tool", make_gradio_app: bool = True):
+    def save(self, output_dir: str | Path, tool_file_name: str = "tool", make_gradio_app: bool = True):
         """
         Saves the relevant code files for your tool so it can be pushed to the Hub. This will copy the code of your
         tool in `output_dir` as well as autogenerate:
@@ -276,7 +276,7 @@ class Tool:
           code)
 
         Args:
-            output_dir (`str`): The folder in which you want to save your tool.
+            output_dir (`str` or `Path`): The folder in which you want to save your tool.
             tool_file_name (`str`, *optional*): The file name in which you want to save your tool.
             make_gradio_app (`bool`, *optional*, defaults to True): Whether to also export a `requirements.txt` file and Gradio UI.
         """
@@ -536,11 +536,9 @@ class Tool:
 
             def sanitize_argument_for_prediction(self, arg):
                 from gradio_client.utils import is_http_url_like
+                from PIL.Image import Image
 
-                if _is_pillow_available():
-                    from PIL.Image import Image
-
-                if _is_pillow_available() and isinstance(arg, Image):
+                if isinstance(arg, Image):
                     temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
                     arg.save(temp_file.name)
                     arg = temp_file.name
@@ -787,17 +785,21 @@ class ToolCollection:
     def from_mcp(cls, server_parameters) -> "ToolCollection":
         """Automatically load a tool collection from an MCP server.
 
+        This method supports both SSE and Stdio MCP servers. Look at the `sever_parameters`
+        argument for more details on how to connect to an SSE or Stdio MCP server.
+
         Note: a separate thread will be spawned to run an asyncio event loop handling
         the MCP server.
 
         Args:
-            server_parameters (mcp.StdioServerParameters): The server parameters to use to
-            connect to the MCP server.
+            server_parameters (mcp.StdioServerParameters | dict):
+                The server parameters to use to connect to the MCP server. If a dict is
+                provided, it is assumed to be the parameters of `mcp.client.sse.sse_client`.
 
         Returns:
             ToolCollection: A tool collection instance.
 
-        Example:
+        Example with a Stdio MCP server:
         ```py
         >>> from smolagents import ToolCollection, CodeAgent
         >>> from mcp import StdioServerParameters
@@ -809,6 +811,13 @@ class ToolCollection:
         >>> )
 
         >>> with ToolCollection.from_mcp(server_parameters) as tool_collection:
+        >>>     agent = CodeAgent(tools=[*tool_collection.tools], add_base_tools=True)
+        >>>     agent.run("Please find a remedy for hangover.")
+        ```
+
+        Example with an SSE MCP server:
+        ```py
+        >>> with ToolCollection.from_mcp({"url": "http://127.0.0.1:8000/sse"}) as tool_collection:
         >>>     agent = CodeAgent(tools=[*tool_collection.tools], add_base_tools=True)
         >>>     agent.run("Please find a remedy for hangover.")
         ```
@@ -827,45 +836,68 @@ class ToolCollection:
 
 def tool(tool_function: Callable) -> Tool:
     """
-    Converts a function into an instance of a Tool subclass.
+    Convert a function into an instance of a dynamically created Tool subclass.
 
     Args:
-        tool_function: Your function. Should have type hints for each input and a type hint for the output.
-        Should also have a docstring description including an 'Args:' part where each argument is described.
+        tool_function (`Callable`): Function to convert into a Tool subclass.
+            Should have type hints for each input and a type hint for the output.
+            Should also have a docstring including the description of the function
+            and an 'Args:' part where each argument is described.
     """
     tool_json_schema = get_json_schema(tool_function)["function"]
     if "return" not in tool_json_schema:
         raise TypeHintParsingException("Tool return type not found: make sure your function has a return type hint!")
 
     class SimpleTool(Tool):
-        def __init__(
-            self,
-            name: str,
-            description: str,
-            inputs: Dict[str, Dict[str, str]],
-            output_type: str,
-            function: Callable,
-        ):
-            self.name = name
-            self.description = description
-            self.inputs = inputs
-            self.output_type = output_type
-            self.forward = function
+        def __init__(self):
             self.is_initialized = True
 
-    simple_tool = SimpleTool(
-        name=tool_json_schema["name"],
-        description=tool_json_schema["description"],
-        inputs=tool_json_schema["parameters"]["properties"],
-        output_type=tool_json_schema["return"]["type"],
-        function=tool_function,
+    # Set the class attributes
+    SimpleTool.name = tool_json_schema["name"]
+    SimpleTool.description = tool_json_schema["description"]
+    SimpleTool.inputs = tool_json_schema["parameters"]["properties"]
+    SimpleTool.output_type = tool_json_schema["return"]["type"]
+    # Bind the tool function to the forward method
+    SimpleTool.forward = staticmethod(tool_function)
+
+    # Get the signature parameters of the tool function
+    sig = inspect.signature(tool_function)
+    # - Add "self" as first parameter to tool_function signature
+    new_sig = sig.replace(
+        parameters=[inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)] + list(sig.parameters.values())
     )
-    original_signature = inspect.signature(tool_function)
-    new_parameters = [inspect.Parameter("self", inspect.Parameter.POSITIONAL_ONLY)] + list(
-        original_signature.parameters.values()
+    # - Set the signature of the forward method
+    SimpleTool.forward.__signature__ = new_sig
+
+    # Create and attach the source code of the dynamically created tool class and forward method
+    # - Get the source code of tool_function
+    tool_source = inspect.getsource(tool_function)
+    # - Remove the tool decorator and function definition line
+    tool_source_body = "\n".join(tool_source.split("\n")[2:])
+    # - Dedent
+    tool_source_body = textwrap.dedent(tool_source_body)
+    # - Create the forward method source, including def line and indentation
+    forward_method_source = f"def forward{str(new_sig)}:\n{textwrap.indent(tool_source_body, '    ')}"
+    # - Create the class source
+    class_source = (
+        textwrap.dedent(f'''
+        class SimpleTool(Tool):
+            name: str = "{tool_json_schema["name"]}"
+            description: str = {json.dumps(textwrap.dedent(tool_json_schema["description"]).strip())}
+            inputs: dict[str, dict[str, str]] = {tool_json_schema["parameters"]["properties"]}
+            output_type: str = "{tool_json_schema["return"]["type"]}"
+
+            def __init__(self):
+                self.is_initialized = True
+
+        ''')
+        + textwrap.indent(forward_method_source, "    ")  # indent for class method
     )
-    new_signature = original_signature.replace(parameters=new_parameters)
-    simple_tool.forward.__signature__ = new_signature
+    # - Store the source code on both class and method for inspection
+    SimpleTool.__source__ = class_source
+    SimpleTool.forward.__source__ = forward_method_source
+
+    simple_tool = SimpleTool()
     return simple_tool
 
 

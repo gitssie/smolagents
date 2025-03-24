@@ -7,6 +7,8 @@ from smolagents.monitoring import AgentLogger, LogLevel
 from smolagents.utils import AgentError, make_json_serializable
 
 if TYPE_CHECKING:
+    import PIL.Image
+
     from smolagents.models import ChatMessage
     from smolagents.monitoring import AgentLogger
 
@@ -143,33 +145,20 @@ class ActionStep(MemoryStep):
 @dataclass
 class PlanningStep(MemoryStep):
     model_input_messages: List[Message]
-    model_output_message_facts: ChatMessage
-    facts: str
-    model_output_message_plan: ChatMessage
+    model_output_message: ChatMessage
     plan: str
     task_id: str = None
 
     def to_messages(self, summary_mode: bool, **kwargs) -> List[Message]:
-        messages = []
-        messages.append(
-            Message(
-                role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"[FACTS LIST]:\n{self.facts.strip()}"}]
-            )
-        )
-
-        if not summary_mode:  # This step is not shown to a model writing a plan to avoid influencing the new plan
-            messages.append(
-                Message(
-                    role=MessageRole.ASSISTANT, content=[{"type": "text", "text": f"[PLAN]:\n{self.plan.strip()}"}]
-                )
-            )
-        return messages
+        if summary_mode:
+            return []
+        return [Message(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": self.plan.strip()}])]
 
 
 @dataclass
 class TaskStep(MemoryStep):
     task: str
-    task_images: List[str] | None = None
+    task_images: List["PIL.Image.Image"] | None = None
     task_id: str = None
 
     def to_messages(self, summary_mode: bool = False, **kwargs) -> List[Message]:
